@@ -4,6 +4,8 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
 # ---------------------------------------------------------
 # CLEANING PIPELINE (runs once and shared by all metrics)
@@ -198,12 +200,9 @@ def calculate_metric_3(folder_path):
 # MAIN PREDICTIVE MODEL – Hourly Journey Counts
 # ---------------------------------------------------------
 
-import os
-import numpy as np
-import pandas as pd
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
+
+
+
 
 
 def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
@@ -222,7 +221,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
       Linear: log(JourneyCount + 1) ~ HourOfDay + HourOfDay^2 + PeakHour + WetDay + Weekend
 
     Uses aggregated data by [Date, HourOfDay, WetDay, Weekend, PeakHour, Mode].
-    Returns a dict with fitted models and metrics.
+    Returns a dict with fitted models and metrics, and writes key CSVs to disk:
+      - global_negbin_residuals.csv
+      - global_linear_residuals.csv
+      - hourly_comparison.csv
     """
 
     # --------------------------
@@ -363,6 +365,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     def fit_nb_and_evaluate(df_train, df_test, formula, label, make_residual_plot=True):
         """
         Fit Negative Binomial GLM on counts, evaluate on test.
+        Also returns residual plot data (fitted vs residuals) for export.
         """
         if df_train.empty:
             print(f"\n{label}: no training data.")
@@ -399,6 +402,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         else:
             print("No test data for this model (all data in train).")
 
+        residual_plot_data = None
+
         # Residual plot (train) – sample to avoid huge plots
         if make_residual_plot:
             fitted = result.fittedvalues
@@ -408,7 +413,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             if len(plot_df) > max_points_resid_plot:
                 plot_df = plot_df.sample(n=max_points_resid_plot, random_state=0)
 
-            # small jitter to avoid strong vertical lines
+            # Save clean data (no jitter) for CSV
+            residual_plot_data = plot_df[["fitted", "resid"]].reset_index(drop=True)
+
+            # Jitter only for plotting
             jitter = np.random.normal(
                 loc=0.0,
                 scale=0.02 * plot_df["fitted"].std(),
@@ -433,6 +441,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             "mae_test": mae,
             "n_train": int(len(df_train)),
             "n_test": int(len(df_test)),
+            "residual_plot_data": residual_plot_data,
         }
 
     def fit_linear_and_evaluate(df_train, df_test, feature_cols, label,
@@ -440,6 +449,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         """
         Fit multiple linear regression on log(JourneyCount + 1),
         evaluate on test in terms of counts.
+        Also returns residual plot data (fitted counts vs residuals) for export.
         """
         if df_train.empty:
             print(f"\n{label}: no training data.")
@@ -472,6 +482,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         else:
             print("No test data for this model (all data in train).")
 
+        residual_plot_data = None
+
         # Residual plot (train) in counts
         if make_residual_plot:
             X_train = df_train[feature_cols].values
@@ -486,6 +498,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             if len(plot_df) > max_points_resid_plot:
                 plot_df = plot_df.sample(n=max_points_resid_plot, random_state=0)
 
+            # Save clean data (no jitter) for CSV
+            residual_plot_data = plot_df[["fitted", "resid"]].reset_index(drop=True)
+
+            # Jitter only for plotting
             jitter = np.random.normal(
                 loc=0.0,
                 scale=0.02 * plot_df["fitted"].std(),
@@ -510,6 +526,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             "n_train": int(len(df_train)),
             "n_test": int(len(df_test)),
             "features": feature_cols,
+            "residual_plot_data": residual_plot_data,
         }
 
     # --------------------------
@@ -629,9 +646,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     results["by_mode"] = per_mode_results
 
     # --------------------------
-    # 7. OPTIONAL: HOURLY COMPARISON PLOT (GLOBAL)
+    # 7. HOURLY COMPARISON PLOT (GLOBAL) + DATA
     # --------------------------
-    # This is handy for your report: actual vs NegBin vs Linear predicted mean counts per hour
     try:
         nb_model = results["global"]["negbin"]["model"]
         lin_model = results["global"]["linear"]["model"]
@@ -664,15 +680,38 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         plt.show()
 
         results["hourly_comparison"] = hourly
+
     except Exception as e:
         print("Skipping hourly comparison plot due to error:", e)
 
+    # --------------------------
+    # 8. SAVE KEY CSV FILES FOR INFOGRAPHICS
+    # --------------------------
+    try:
+        # Global NegBin residuals
+        nb_resid = results["global"]["negbin"].get("residual_plot_data")
+        if nb_resid is not None:
+            nb_path = os.path.join(folder_path, "global_negbin_residuals.csv")
+            nb_resid.to_csv(nb_path, index=False)
+            print(f"Saved global NegBin residuals to: {nb_path}")
+
+        # Global Linear residuals
+        lin_resid = results["global"]["linear"].get("residual_plot_data")
+        if lin_resid is not None:
+            lin_path = os.path.join(folder_path, "global_linear_residuals.csv")
+            lin_resid.to_csv(lin_path, index=False)
+            print(f"Saved global Linear residuals to: {lin_path}")
+
+        # Hourly comparison (Actual vs NegBin vs Linear)
+        if "hourly_comparison" in results:
+            hourly_path = os.path.join(folder_path, "hourly_comparison.csv")
+            results["hourly_comparison"].to_csv(hourly_path, index=False)
+            print(f"Saved hourly comparison to: {hourly_path}")
+
+    except Exception as e:
+        print("Error saving CSV files:", e)
+
     return results
-
-
-
-
-
 
 
 
@@ -701,6 +740,6 @@ if __name__ == "__main__":
     #calculate_metric_2(folder_path)
     #calculate_metric_3(folder_path)
 
-    #main_model_results = build_main_model_count(folder_path)
+    main_model_results = build_main_model_count(folder_path)
    
 
