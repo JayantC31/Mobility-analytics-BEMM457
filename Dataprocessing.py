@@ -7,9 +7,7 @@ import matplotlib.pyplot as plt
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
-# ---------------------------------------------------------
-# CLEANING PIPELINE (runs once and shared by all metrics)
-# ---------------------------------------------------------
+# load the data from the files
 
 def load_and_clean_durations(folder_path):
     durations = []
@@ -23,33 +21,31 @@ def load_and_clean_durations(folder_path):
                 col = pd.to_numeric(df["Total duration (ms)"], errors="coerce")
                 col = col.dropna()
 
-                # Convert ms → minutes
+                # Convert ms to minutes
                 col = col / 60000
 
                 durations.extend(col)
 
     durations = pd.Series(durations)
 
-    # Remove invalid durations
+    # remove invalid durations
     durations = durations[durations > 0]
 
-    # Remove extreme short + long
+    # outliers
     lower = durations.quantile(0.01)
     upper = durations.quantile(0.99)
     durations = durations[(durations >= lower) & (durations <= upper)]
 
-    # Cap at 3 hours
+    # 3 hour cap for outlier
     durations = durations[durations <= 180]
 
-    # Drop duplicates
+    # drop duplicates
     durations = durations.drop_duplicates()
 
     return durations
 
 
-# ---------------------------------------------------------
-# METRIC 1 – Journey Duration Statistics
-# ---------------------------------------------------------
+# metric 1
 
 def calculate_metric_1(folder_path):
     durations_clean = load_and_clean_durations(folder_path)
@@ -67,9 +63,7 @@ def calculate_metric_1(folder_path):
     }
 
 
-# ---------------------------------------------------------
-# METRIC 2 – Weather-Based Journey Frequency
-# ---------------------------------------------------------
+# metric 2
 
 def calculate_metric_2(folder_path):
     daily_counts = {}
@@ -94,7 +88,7 @@ def calculate_metric_2(folder_path):
                         "weather": row["Weather"],
                         "count": row["Count"]
                     }
-
+    # weather dataset
     if not daily_counts:
         print("No weather datasets found.")
         return None
@@ -104,7 +98,7 @@ def calculate_metric_2(folder_path):
     df_weather["condition"] = df_weather["weather"].str.lower().apply(
         lambda x: "wet" if "rain" in x or "wet" in x else "dry"
     )
-
+    # wet condition
     results = df_weather.groupby("condition")["count"].agg(
         Mean="mean",
         Standard_Deviation="std",
@@ -118,9 +112,7 @@ def calculate_metric_2(folder_path):
     return results
 
 
-# ---------------------------------------------------------
-# METRIC 3 – Peak vs Off-Peak Hourly Frequency
-# ---------------------------------------------------------
+# metric 3 
 
 def calculate_metric_3(folder_path):
 
@@ -135,7 +127,7 @@ def calculate_metric_3(folder_path):
             file_path = os.path.join(folder_path, filename)
             df = pd.read_csv(file_path)
 
-            # CASE A: Trip-level dataset with "Start date"
+            # start date
             if "Start date" in df.columns:
                 df["Start date"] = pd.to_datetime(
                     df["Start date"], 
@@ -154,7 +146,7 @@ def calculate_metric_3(folder_path):
                     else:
                         offpeak_counts.append(count)
 
-            # CASE B: Aggregated dataset with "Time" + "Count"
+            # time and count
             elif {"Time", "Count"}.issubset(df.columns):
                 df["Count"] = pd.to_numeric(df["Count"], errors="coerce").fillna(0)
 
@@ -196,40 +188,13 @@ def calculate_metric_3(folder_path):
     }
 
 
-# ---------------------------------------------------------
-# MAIN PREDICTIVE MODEL – Hourly Journey Counts
-# ---------------------------------------------------------
-
-
-
-
-
+# main model
 
 def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
                            max_points_resid_plot=5000):
-    """
-    Builds models for JourneyCount using:
-      - Negative Binomial GLMs (count model)
-      - Multiple Linear Regression on log(JourneyCount + 1)
+    
 
-    Global models (all modes):
-      NegBin: JourneyCount ~ C(HourOfDay) + PeakHour + WetDay + Weekend + C(Mode)
-      Linear: log(JourneyCount + 1) ~ HourOfDay + HourOfDay^2 + PeakHour + WetDay + Weekend + Mode dummies
-
-    Per-mode models (for each Mode):
-      NegBin: JourneyCount ~ C(HourOfDay) + PeakHour + WetDay + Weekend
-      Linear: log(JourneyCount + 1) ~ HourOfDay + HourOfDay^2 + PeakHour + WetDay + Weekend
-
-    Uses aggregated data by [Date, HourOfDay, WetDay, Weekend, PeakHour, Mode].
-    Returns a dict with fitted models and metrics, and writes key CSVs to disk:
-      - global_negbin_residuals.csv
-      - global_linear_residuals.csv
-      - hourly_comparison.csv
-    """
-
-    # --------------------------
-    # 1. LOAD & PREPARE DATA
-    # --------------------------
+    # load data
     all_dfs = []
 
     for filename in os.listdir(folder_path):
@@ -243,11 +208,11 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         if not required_cols.issubset(df.columns):
             continue
 
-        # Parse date
+        # date
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
         df = df.dropna(subset=["Date"])
 
-        # Parse time → hour (robust)
+        # time to hour
         df["Time_parsed"] = pd.to_datetime(
             df["Time"].astype(str),
             errors="coerce",
@@ -256,26 +221,26 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         df["hour"] = df["Time_parsed"].dt.hour
         df = df.dropna(subset=["hour"])
 
-        # Clean Count: keep zeros, drop negatives
+        # drop negatives
         df["Count"] = pd.to_numeric(df["Count"], errors="coerce")
         df = df.dropna(subset=["Count"])
         df = df[df["Count"] >= 0]
 
-        # Wet / dry flag
+        # wet and dry
         df["WetDay"] = df["Weather"].astype(str).str.lower().apply(
             lambda x: 1 if ("rain" in x or "wet" in x) else 0
         )
 
-        # Weekend flag (5=Saturday, 6=Sunday)
+        # make weekend
         df["Weekend"] = df["Date"].dt.dayofweek.apply(lambda d: 1 if d >= 5 else 0)
 
-        # Peak hour flag (7–9 and 16–18)
+        # peak hours
         peak_hours = {7, 8, 9, 16, 17, 18}
         df["PeakHour"] = df["hour"].apply(
             lambda h: 1 if int(h) in peak_hours else 0
         )
 
-        # Mode – if not provided, treat everything as a single mode
+        # mode divider
         if "Mode" in df.columns:
             df["Mode"] = df["Mode"].astype(str)
         else:
@@ -294,15 +259,13 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
 
     model_df = pd.concat(all_dfs, ignore_index=True)
 
-    # Ensure integer types
+    
     model_df["HourOfDay"] = model_df["HourOfDay"].astype(int)
     model_df["WetDay"] = model_df["WetDay"].astype(int)
     model_df["Weekend"] = model_df["Weekend"].astype(int)
     model_df["PeakHour"] = model_df["PeakHour"].astype(int)
 
-    # --------------------------
-    # 2. AGGREGATE TO REDUCE SIZE
-    # --------------------------
+    
     group_cols = ["Date", "HourOfDay", "WetDay", "Weekend", "PeakHour", "Mode"]
 
     print("Rows before aggregation:", len(model_df))
@@ -317,13 +280,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         print("After aggregation, there are no rows left – check your filters / parsing.")
         return None
 
-    # Sort by time
+    # sort by time
     model_df = model_df.sort_values(["Date", "HourOfDay"]).reset_index(drop=True)
 
-    # --------------------------
-    # 3. FEATURES FOR BOTH MODELS
-    # --------------------------
-    # For linear regression
+   # regression
     model_df["log_journeys"] = np.log1p(model_df["JourneyCount"])
     model_df["Hour_sq"] = model_df["HourOfDay"] ** 2
 
@@ -336,13 +296,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     base_features = ["HourOfDay", "Hour_sq", "PeakHour", "WetDay", "Weekend"]
     global_linear_features = base_features + list(mode_dummies.columns)
 
-    # --------------------------
-    # 4. HELPER FUNCTIONS
-    # --------------------------
+    # split based on time
     def time_based_split(df, date_col="Date", test_frac=0.2):
         """
-        Split df into train/test by date (not random), using test_frac of unique dates.
-        Robust to empty data.
+        time
         """
         if df.empty:
             return df.copy(), df.copy(), None
@@ -363,10 +320,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         return train, test, split_date
 
     def fit_nb_and_evaluate(df_train, df_test, formula, label, make_residual_plot=True):
-        """
-        Fit Negative Binomial GLM on counts, evaluate on test.
-        Also returns residual plot data (fitted vs residuals) for export.
-        """
+        
+        
         if df_train.empty:
             print(f"\n{label}: no training data.")
             return None
@@ -378,18 +333,18 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
                             family=sm.families.NegativeBinomial())
         result = glm_model.fit()
 
-        # Pseudo R^2 (train) using null model
+        
         null_model = smf.glm("JourneyCount ~ 1", data=df_train,
                              family=sm.families.NegativeBinomial()).fit()
         pseudo_r2 = 1 - result.deviance / null_model.deviance
 
-        # Dispersion (train)
+        
         dispersion = result.pearson_chi2 / result.df_resid
 
         print("Pseudo R-squared (train):", round(pseudo_r2, 3))
         print("Dispersion (train):", round(dispersion, 3))
 
-        # Test metrics
+        # testing metrics
         rmse = None
         mae = None
         if df_test is not None and not df_test.empty:
@@ -404,7 +359,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
 
         residual_plot_data = None
 
-        # Residual plot (train) – sample to avoid huge plots
+        # residual plot 
         if make_residual_plot:
             fitted = result.fittedvalues
             residuals = df_train["JourneyCount"] - fitted
@@ -413,10 +368,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             if len(plot_df) > max_points_resid_plot:
                 plot_df = plot_df.sample(n=max_points_resid_plot, random_state=0)
 
-            # Save clean data (no jitter) for CSV
+            # csv 
             residual_plot_data = plot_df[["fitted", "resid"]].reset_index(drop=True)
 
-            # Jitter only for plotting
+            # plot
             jitter = np.random.normal(
                 loc=0.0,
                 scale=0.02 * plot_df["fitted"].std(),
@@ -447,9 +402,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     def fit_linear_and_evaluate(df_train, df_test, feature_cols, label,
                                 make_residual_plot=True):
         """
-        Fit multiple linear regression on log(JourneyCount + 1),
-        evaluate on test in terms of counts.
-        Also returns residual plot data (fitted counts vs residuals) for export.
+        linear
         """
         if df_train.empty:
             print(f"\n{label}: no training data.")
@@ -484,7 +437,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
 
         residual_plot_data = None
 
-        # Residual plot (train) in counts
+        # residual plot
         if make_residual_plot:
             X_train = df_train[feature_cols].values
             y_true_train = df_train["JourneyCount"].values
@@ -498,10 +451,10 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             if len(plot_df) > max_points_resid_plot:
                 plot_df = plot_df.sample(n=max_points_resid_plot, random_state=0)
 
-            # Save clean data (no jitter) for CSV
+            
             residual_plot_data = plot_df[["fitted", "resid"]].reset_index(drop=True)
 
-            # Jitter only for plotting
+            # plot
             jitter = np.random.normal(
                 loc=0.0,
                 scale=0.02 * plot_df["fitted"].std(),
@@ -529,10 +482,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             "residual_plot_data": residual_plot_data,
         }
 
-    # --------------------------
-    # 5. GLOBAL MODELS (ALL MODES)
-    # --------------------------
-    print("\n================ GLOBAL MODELS (ALL MODES) ================")
+    
+    print("\n global:")
 
     global_nb_formula = "JourneyCount ~ C(HourOfDay) + PeakHour + WetDay + Weekend + C(Mode)"
 
@@ -566,7 +517,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         },
     }
 
-    # Global Negative Binomial
+    # negative binomal
     results["global"]["negbin"] = fit_nb_and_evaluate(
         global_train,
         global_test,
@@ -575,7 +526,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         make_residual_plot=True,
     )
 
-    # Global Linear Regression on log counts
+    # linear regression
     results["global"]["linear"] = fit_linear_and_evaluate(
         global_train,
         global_test,
@@ -584,10 +535,8 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         make_residual_plot=True,
     )
 
-    # --------------------------
-    # 6. PER-MODE MODELS
-    # --------------------------
-    print("\n================ PER-MODE MODELS ================")
+ 
+    print("\n per mode models:")
 
     per_mode_results = {}
     per_mode_nb_formula = "JourneyCount ~ C(HourOfDay) + PeakHour + WetDay + Weekend"
@@ -632,7 +581,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
             make_residual_plot=True,
         )
 
-        # Linear per mode (no mode dummies, just base features)
+        # linear
         mode_result["linear"] = fit_linear_and_evaluate(
             mode_train,
             mode_test,
@@ -645,9 +594,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
 
     results["by_mode"] = per_mode_results
 
-    # --------------------------
-    # 7. HOURLY COMPARISON PLOT (GLOBAL) + DATA
-    # --------------------------
+
     try:
         nb_model = results["global"]["negbin"]["model"]
         lin_model = results["global"]["linear"]["model"]
@@ -655,7 +602,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
         # NegBin predictions on all data
         model_df["pred_nb"] = nb_model.predict(model_df)
 
-        # Linear predictions on all data (convert back from log)
+        # linear predictions on all data (convert back from log)
         X_all = model_df[global_linear_features].values
         pred_log_all = lin_model.predict(X_all)
         model_df["pred_lin"] = np.expm1(pred_log_all)
@@ -684,25 +631,23 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     except Exception as e:
         print("Skipping hourly comparison plot due to error:", e)
 
-    # --------------------------
-    # 8. SAVE KEY CSV FILES FOR INFOGRAPHICS
-    # --------------------------
+    # save for csv
     try:
-        # Global NegBin residuals
+        
         nb_resid = results["global"]["negbin"].get("residual_plot_data")
         if nb_resid is not None:
             nb_path = os.path.join(folder_path, "global_negbin_residuals.csv")
             nb_resid.to_csv(nb_path, index=False)
             print(f"Saved global NegBin residuals to: {nb_path}")
 
-        # Global Linear residuals
+        
         lin_resid = results["global"]["linear"].get("residual_plot_data")
         if lin_resid is not None:
             lin_path = os.path.join(folder_path, "global_linear_residuals.csv")
             lin_resid.to_csv(lin_path, index=False)
             print(f"Saved global Linear residuals to: {lin_path}")
 
-        # Hourly comparison (Actual vs NegBin vs Linear)
+        
         if "hourly_comparison" in results:
             hourly_path = os.path.join(folder_path, "hourly_comparison.csv")
             results["hourly_comparison"].to_csv(hourly_path, index=False)
@@ -714,24 +659,7 @@ def build_main_model_count(folder_path, test_fraction=0.2, min_obs_per_mode=50,
     return results
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------
-# RUN EVERYTHING
-# ---------------------------------------------------------
+# USED TO RUN EVERYTHING
 
 if __name__ == "__main__":
     folder_path = r"C:\Users\jcgam\OneDrive\Documents\Year4\TFL"
