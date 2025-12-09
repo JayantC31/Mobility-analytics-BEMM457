@@ -1,6 +1,6 @@
 # Mobility-analytics-BEMM457
 
-A Streamlit app for analyzing 2023 London Cycle Hire Datasets
+An Infogram app for analyzing 2023 London Cycle Hire Datasets
 
 Jayant Chawla
 
